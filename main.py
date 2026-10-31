@@ -38,6 +38,12 @@ def validate_image_name(image_name):
     if not isinstance(image_name, str) or not image_name:
         logging.error("Invalid image name: Image name must be a non-empty string.")
         return False
+    if image_name.startswith("-"):
+        logging.error("Invalid image name: Image name must not start with a dash.")
+        return False
+    if any(ch.isspace() for ch in image_name) or any(ch in ";|&$`\\\"'<>\\(){}[]!#*?~" for ch in image_name):
+        logging.error("Invalid image name: Image name contains whitespace or shell metacharacters.")
+        return False
     return True
 
 
@@ -60,9 +66,10 @@ def run_scanner(image_name, scanner, output_format):
                 command += ['--output-format', 'json']
 
         elif scanner == 'trivy':
+            # No --output file: trivy prints its JSON to stdout, which this
+            # tool parses. Writing result.json here would overwrite a file
+            # in the working directory that the run did not create.
             command = ['trivy', 'image', '--format', output_format, image_name]
-            if output_format == 'json':
-                command += ['--output', 'result.json']
         else:
             logging.error(f"Invalid scanner specified: {scanner}")
             return None, None
@@ -104,30 +111,28 @@ def summarize_results(results, scanner, severity_filter=None):
             vulnerabilities = data.get('matches', [])
         elif scanner == 'trivy':
             data = json.loads(results)
-            results_section = data[0].get('Results', []) #Trivy JSON format is different
-            if results_section: # Check if the 'Results' section is not empty
-                vulnerabilities_raw = results_section[0].get('Vulnerabilities', [])
-                # Adapt Trivy JSON to match Grype vulnerability format for consistency
+            # A trivy JSON document is a top level object with a Results list.
+            results_section = data.get('Results', []) if isinstance(data, dict) else []
+            for section in results_section:
+                vulnerabilities_raw = section.get('Vulnerabilities', []) or []
                 for vul in vulnerabilities_raw:
                     formatted_vul = {
                         'vulnerability': {
-                            'id': vul['VulnerabilityID'],
-                            'severity': vul['Severity'].lower(),  # Normalize severity to lowercase
-                            'description': vul['Description'],
-                            'references': [{'url': vul['PrimaryURL']}]  # Simplify references
+                            'id': vul.get('VulnerabilityID', 'N/A'),
+                            'severity': str(vul.get('Severity', 'unknown')).lower(),
+                            'description': vul.get('Description', 'No description available'),
+                            'references': [{'url': vul.get('PrimaryURL', 'N/A')}]
                         },
-                        'artifact': {'name': vul['PkgName'], 'version': vul['InstalledVersion']} #added artifact name and version
+                        'artifact': {'name': vul.get('PkgName', 'N/A'), 'version': vul.get('InstalledVersion', 'N/A')}
                     }
                     vulnerabilities.append(formatted_vul)
-            else:
-                logging.warning("No vulnerabilities found in Trivy scan results.")
 
         summary = ""
         vulnerability_count = 0
 
         for match in vulnerabilities:
-            severity = match.get('vulnerability', {}).get('severity', 'unknown')
-            if severity_filter and severity != severity_filter:
+            severity = str(match.get('vulnerability', {}).get('severity', 'unknown')).lower()
+            if severity_filter and severity != str(severity_filter).lower():
                 continue
 
             vulnerability_id = match.get('vulnerability', {}).get('id', 'N/A')
@@ -172,7 +177,10 @@ def main():
     if not validate_image_name(args.image_name):
         sys.exit(1)
 
-    return_code, results = run_scanner(args.image_name, args.scanner, args.output)
+    # A severity filter needs parsed results, so it runs the scanner in
+    # JSON mode and prints the filtered summary even in text mode.
+    effective_output = 'json' if args.severity else args.output
+    return_code, results = run_scanner(args.image_name, args.scanner, effective_output)
 
     if return_code is None:
         sys.exit(1)
@@ -182,8 +190,11 @@ def main():
         sys.exit(1)
 
 
-    if args.output == 'json':
+    if effective_output == 'json':
         summary = summarize_results(results, args.scanner, args.severity)
+        if summary.startswith("Error:"):
+            print(summary)
+            sys.exit(1)
     else:
         summary = results
 
