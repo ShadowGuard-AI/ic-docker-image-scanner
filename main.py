@@ -38,6 +38,10 @@ def validate_image_name(image_name):
     if not isinstance(image_name, str) or not image_name:
         logging.error("Invalid image name: Image name must be a non-empty string.")
         return False
+    # The subprocess is an argv list, so shell metacharacters would be
+    # inert anyway. The check that earns its place is the leading dash:
+    # an image name starting with one would be read by the scanner as its
+    # own flag. The rest of the character list is defence in depth.
     if image_name.startswith("-"):
         logging.error("Invalid image name: Image name must not start with a dash.")
         return False
@@ -63,6 +67,9 @@ def run_scanner(image_name, scanner, output_format):
         if scanner == 'grype':
             command = ['grype', image_name, '-o', output_format]
             if output_format == 'json':
+                # In JSON mode the format is passed twice, once as -o and once as
+                # --output-format. If the installed Grype accepts only one of those
+                # spellings, the JSON path fails at the scanner while text runs work.
                 command += ['--output-format', 'json']
 
         elif scanner == 'trivy':
@@ -116,6 +123,10 @@ def summarize_results(results, scanner, severity_filter=None):
             for section in results_section:
                 vulnerabilities_raw = section.get('Vulnerabilities', []) or []
                 for vul in vulnerabilities_raw:
+                    # Trivy results are rebuilt into the Grype match shape by hand, so the
+                    # summary loop below has one shape to read. Fields Trivy reports that
+                    # the shape has no room for, fixed version among them, are dropped at
+                    # this step and never reach the summary.
                     formatted_vul = {
                         'vulnerability': {
                             'id': vul.get('VulnerabilityID', 'N/A'),
@@ -200,6 +211,11 @@ def main():
 
     print(summary)
 
+    # The exit on vuln decision reads the summary as text and searches for
+    # two exact sentences. In JSON mode those sentences are this tool's
+    # own, so the test is sound there. In text mode the summary is the
+    # scanner's raw output, and whether the sentences appear depends on
+    # the scanner's wording, not on the findings.
     if args.exit_on_vuln and "No vulnerabilities found" not in summary:
          if "Total Vulnerabilities Found: 0" not in summary:
               sys.exit(1) # Exit with non-zero code if vulnerabilities are found
